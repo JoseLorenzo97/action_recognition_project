@@ -1,6 +1,7 @@
 import os
 import glob
-import random
+import argparse
+import csv
 from typing import List, Tuple
 
 import cv2
@@ -14,11 +15,16 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from models.cnn_lstm import CNNLSTM
 
 
-# -----------------------------
-# Dataset 
-# -----------------------------
 class VideoFolderDataset(Dataset):
-
+    """
+    Expects a folder structure like:
+        data_root/
+            running/
+                vid1.mp4
+                vid2.mp4
+            walking/
+                ...
+    """
 
     def __init__(self, root_dir: str, classes: List[str], clip_len: int = 16, transform=None):
         self.root_dir = root_dir
@@ -30,8 +36,9 @@ class VideoFolderDataset(Dataset):
         for idx, cls in enumerate(classes):
             class_dir = os.path.join(root_dir, cls)
             for ext in ("*.mp4", "*.avi", "*.mov"):
-                for path in glob.glob(os.path.join(class_dir, ext)):
-                    self.samples.append((path, idx))
+                self.samples.extend(
+                    (path, idx) for path in glob.glob(os.path.join(class_dir, ext))
+                )
 
         if len(self.samples) == 0:
             raise RuntimeError(f"No videos found in {root_dir}. Check paths and class names.")
@@ -53,15 +60,13 @@ class VideoFolderDataset(Dataset):
         cap.release()
 
         if len(frames) == 0:
-            
             frames = [np.zeros((224, 224, 3), dtype=np.uint8)] * self.clip_len
 
-       
         idxs = np.linspace(0, len(frames) - 1, self.clip_len).astype(int)
         clip = [frames[i] for i in idxs]
 
         if self.transform is not None:
-            clip = [self.transform(img) for img in clip]  # list of (C,H,W)
+            clip = [self.transform(img) for img in clip]
 
         clip = torch.stack(clip, dim=0)  # (T, C, H, W)
         return clip
@@ -72,17 +77,13 @@ class VideoFolderDataset(Dataset):
         return clip, label
 
 
-# -----------------------------
-# Training
-# -----------------------------
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
-    all_preds = []
-    all_labels = []
+    all_preds, all_labels = [], []
 
     for clips, labels in loader:
-        clips = clips.to(device)           # (B, T, C, H, W)
+        clips = clips.to(device)
         labels = labels.to(device)
 
         optimizer.zero_grad()
@@ -107,8 +108,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 def evaluate(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
-    all_preds = []
-    all_labels = []
+    all_preds, all_labels = [], []
 
     for clips, labels in loader:
         clips = clips.to(device)
@@ -127,85 +127,121 @@ def evaluate(model, loader, criterion, device):
     epoch_acc = accuracy_score(all_labels, all_preds)
     epoch_f1 = f1_score(all_labels, all_preds, average="macro")
     cm = confusion_matrix(all_labels, all_preds)
-
     return epoch_loss, epoch_acc, epoch_f1, cm
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train and evaluate CNN+LSTM for action recognition.")
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        required=True,
+        help="Path to the root folder of the dataset (e.g. UCF101 subset).",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=5,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="Mini-batch size.",
+    )
+    parser.add_argument(
+        "--output_csv",
+        type=str,
+        default="results_metrics.csv",
+        help="Path to CSV file where metrics per epoch are stored.",
+    )
+    return parser.parse_args()
+
+
 def main():
-    # -----------------------------
-    # CONFIG 
-    # -----------------------------
-    root_dir = "data/ucf_subset"   
+    args = parse_args()
+
     classes = ["running", "walking", "jumping", "falling", "punching"]
     num_classes = len(classes)
-
-    batch_size = 4
-    num_epochs = 5      
-    lr = 1e-4
     clip_len = 16
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
+    print("Dataset root:", args.data_root)
 
-    # -----------------------------
-    # Transforms y dataset
-    # -----------------------------
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.ToPILImage(),
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+        ]
+    )
 
     dataset = VideoFolderDataset(
-        root_dir=root_dir,
+        root_dir=args.data_root,
         classes=classes,
         clip_len=clip_len,
         transform=transform,
     )
 
-    # 70/30 split train/val
     train_len = int(0.7 * len(dataset))
     val_len = len(dataset) - train_len
     train_ds, val_ds = random_split(dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # -----------------------------
-    # Model CNN+LSTM
-    # -----------------------------
     model = CNNLSTM(num_classes=num_classes)
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     best_val_acc = 0.0
     best_state = None
 
-    for epoch in range(1, num_epochs + 1):
-        train_loss, train_acc, train_f1 = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+    # abrir CSV y escribir cabecera
+    with open(args.output_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["epoch", "train_loss", "train_acc", "train_f1", "val_loss", "val_acc", "val_f1"]
         )
-        val_loss, val_acc, val_f1, cm = evaluate(
-            model, val_loader, criterion, device
-        )
 
-        print(f"Epoch {epoch}/{num_epochs}")
-        print(f"  Train: loss={train_loss:.4f}, acc={train_acc:.4f}, f1={train_f1:.4f}")
-        print(f"  Val  : loss={val_loss:.4f}, acc={val_acc:.4f}, f1={val_f1:.4f}")
-        print("  Confusion matrix:")
-        print(cm)
+        for epoch in range(1, args.epochs + 1):
+            train_loss, train_acc, train_f1 = train_one_epoch(
+                model, train_loader, criterion, optimizer, device
+            )
+            val_loss, val_acc, val_f1, cm = evaluate(
+                model, val_loader, criterion, device
+            )
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_state = model.state_dict()
+            print(f"Epoch {epoch}/{args.epochs}")
+            print(f"  Train: loss={train_loss:.4f}, acc={train_acc:.4f}, f1={train_f1:.4f}")
+            print(f"  Val  : loss={val_loss:.4f}, acc={val_acc:.4f}, f1={val_f1:.4f}")
+            print("  Confusion matrix:")
+            print(cm)
 
-    # Save model
+            writer.writerow(
+                [epoch, train_loss, train_acc, train_f1, val_loss, val_acc, val_f1]
+            )
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                best_state = model.state_dict()
+
     os.makedirs("saved_models", exist_ok=True)
-    torch.save(best_state, "saved_models/cnn_lstm_best.pth")
-    print(f"Best val accuracy: {best_val_acc:.4f}")
+    if best_state is not None:
+        torch.save(best_state, "saved_models/cnn_lstm_best.pth")
+        print(f"Best val accuracy: {best_val_acc:.4f}")
+        print("Model saved to saved_models/cnn_lstm_best.pth")
+    print(f"Metrics saved to {args.output_csv}")
+
+
+if __name__ == "__main__":
+    main()
+
     print("Model saved to saved_models/cnn_lstm_best.pth")
 
 
