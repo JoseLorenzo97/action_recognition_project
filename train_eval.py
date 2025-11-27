@@ -15,7 +15,7 @@ from models.cnn_lstm import CNNLSTM
 
 
 # -----------------------------
-# Dataset sencillo basado en carpetas
+# Dataset 
 # -----------------------------
 class VideoFolderDataset(Dataset):
 
@@ -73,7 +73,7 @@ class VideoFolderDataset(Dataset):
 
 
 # -----------------------------
-# Entrenamiento
+# Training
 # -----------------------------
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
@@ -133,7 +133,7 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     # -----------------------------
-    # CONFIG (ajusta estas rutas)
+    # CONFIG 
     # -----------------------------
     root_dir = "data/ucf_subset"   
     classes = ["running", "walking", "jumping", "falling", "punching"]
@@ -173,7 +173,7 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # -----------------------------
-    # Modelo CNN+LSTM
+    # Model CNN+LSTM
     # -----------------------------
     model = CNNLSTM(num_classes=num_classes)
     model = model.to(device)
@@ -202,7 +202,7 @@ def main():
             best_val_acc = val_acc
             best_state = model.state_dict()
 
-    # Guardamos el mejor modelo
+    # Save model
     os.makedirs("saved_models", exist_ok=True)
     torch.save(best_state, "saved_models/cnn_lstm_best.pth")
     print(f"Best val accuracy: {best_val_acc:.4f}")
